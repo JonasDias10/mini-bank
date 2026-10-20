@@ -1,27 +1,69 @@
 # SimpleBank
 
-A small banking system built with two Spring Boot microservices. It is meant as a learning project: the code is kept simple and follows a plain Controller, Service, Repository structure.
+A small banking system built with two Spring Boot microservices that talk through RabbitMQ. It is a learning project: the code follows a plain Controller, Service, Repository structure, and each distributed-systems pattern it uses (Saga, Outbox, idempotent consumer, dead-letter queue, contract tests) is kept as small as possible.
 
-| Service               | Port | Responsibility                                            | Database        |
-|-----------------------|------|-----------------------------------------------------------|-----------------|
-| `account-service`     | 8081 | Register customers, open accounts, read details/balances  | `accountdb`     |
-| `transaction-service` | 8082 | Deposits, withdrawals and transfers                       | `transactiondb` |
-| `frontend`            | 4200 | Angular test console that calls both services             | none            |
+| Service               | Port | Responsibility                                                    | Database        |
+|-----------------------|------|-------------------------------------------------------------------|-----------------|
+| `account-service`     | 8081 | Customers, accounts, balances; applies credit/debit commands      | `accountdb`     |
+| `transaction-service` | 8082 | Deposits, withdrawals and transfers (orchestrates the saga)       | `transactiondb` |
+| `frontend`            | 4200 | Angular test console that calls both services                     | none            |
+| `rabbitmq`            | 5672 | Message broker (management UI on http://localhost:15672)          | none            |
 
-Both databases live in a single PostgreSQL container, but each service only talks to its own database. The transaction-service never touches account data directly: it calls account-service over REST.
+Each service owns its database and its code: nothing is shared, and the services never call each other over HTTP. Money only moves through messages.
 
 ```
-            ┌──────────────────────┐   REST (credit / debit)   ┌──────────────────┐
- client ──► │ transaction-service  │ ────────────────────────► │ account-service  │ ◄── client
-            │       :8082          │                           │      :8081       │
-            └──────────┬───────────┘                           └────────┬─────────┘
-                       │                                                │
-                 transactiondb  ◄──────── PostgreSQL :5432 ────────►  accountdb
+                         ┌─────────────────────────── RabbitMQ ───────────────────────────┐
+                         │                                                                │
+ client ──► transaction-service ── account-operation-commands ──► account-service ◄── client
+   (202 PENDING)    │    ▲                                              │
+                    │    └──────── account-operation-results ◄──────────┘
+                    │                                                   │
+              transactiondb                                         accountdb
+       (transactions + outbox)                (accounts + processed_operations + outbox)
 ```
 
 ## Tech stack
 
-Java 21, Spring Boot 3.5, Spring Web, Spring Data JPA, Bean Validation, Flyway, PostgreSQL 16, Maven, Docker Compose. Test frontend: Angular 20 served by nginx.
+Java 21, Spring Boot 3.5, Spring Web, Spring Data JPA, Spring AMQP, Bean Validation, Flyway, PostgreSQL 16, RabbitMQ 4.1, Maven, Docker Compose. Tests: JUnit 5, Mockito, AssertJ, Testcontainers, Awaitility, Pact. Test frontend: Angular 20 served by nginx.
+
+## How a transaction flows
+
+1. The client calls `POST /api/transactions/deposit` (or `withdraw`, `transfer`).
+2. transaction-service saves the transaction as **`PENDING`** and, **in the same database transaction**, writes the first command to its outbox table. It answers **`202 Accepted`** right away.
+3. The outbox relay publishes the command to RabbitMQ.
+4. account-service applies the credit or debit, marks the command as processed and writes the result to its own outbox, all in one database transaction. Its relay publishes the result.
+5. transaction-service receives the result and moves the saga forward until the transaction is **`COMPLETED`** or **`FAILED`** (with a `failureReason`).
+6. The client polls `GET /api/transactions/{id}` to see the final status. The frontend does this automatically.
+
+### Saga steps
+
+| Type         | Steps                                   | Outcome                                                                  |
+|--------------|-----------------------------------------|--------------------------------------------------------------------------|
+| `DEPOSIT`    | credit target                           | `COMPLETED`, or `FAILED` (e.g. account not found)                        |
+| `WITHDRAWAL` | debit source                            | `COMPLETED`, or `FAILED` (e.g. insufficient funds)                       |
+| `TRANSFER`   | debit source, then credit target        | `COMPLETED`, or `FAILED` if the debit fails (nothing moved)              |
+|              | credit fails, then refund source        | `FAILED` with reason "... Amount refunded to source account"             |
+
+The state machine lives in [TransactionSaga.java](transaction-service/src/main/java/com/simplebank/transaction/service/TransactionSaga.java).
+
+### Reliability patterns
+
+- **Transactional outbox** (both services). A message is never published directly from business code. It is saved to `outbox_messages` in the same transaction as the change it announces, then [OutboxRelay](account-service/src/main/java/com/simplebank/account/outbox/OutboxRelay.java) publishes it every 500 ms and marks it sent only after RabbitMQ confirms it (publisher confirms). If the broker is down, messages wait in the table.
+- **At-least-once delivery + idempotent consumers.** Because of the outbox, a message may be published twice (for example, if the app dies after publishing but before marking the row as sent). Both sides handle duplicates:
+  - account-service stores every applied `operationId` in `processed_operations`. The primary key guarantees a command is applied once, even under concurrency.
+  - transaction-service only accepts a result whose `operationId` matches the step the transaction is currently waiting for, and locks the row while doing it.
+- **Business failures are results, not errors.** Insufficient funds or an unknown account come back as `success: false` with a reason.
+- **Retries and dead-letter queues.** Technical failures (database down, malformed message) are retried 3 times; after that the message goes to `<queue>.dlq` instead of looping forever. Inspect them in the RabbitMQ UI.
+- **No temporal coupling.** transaction-service keeps accepting operations while account-service is down. They stay `PENDING` and complete as soon as it comes back.
+
+Try the last one yourself:
+
+```bash
+docker compose stop account-service
+curl -s -X POST localhost:8082/api/transactions/deposit -H 'Content-Type: application/json' \
+  -d '{"accountId":1,"amount":10}'                     # 202, status PENDING
+docker compose start account-service                 # a few seconds later: COMPLETED
+```
 
 ## Project structure
 
@@ -29,55 +71,57 @@ Java 21, Spring Boot 3.5, Spring Web, Spring Data JPA, Bean Validation, Flyway, 
 mini-bank/
 ├── docker-compose.yml
 ├── docker/postgres/init.sql          # creates the second database (transactiondb)
+├── pacts/                            # message contracts between the services (generated by tests)
 ├── requests.http                     # ready-to-run example requests
 ├── run-tests.sh                      # runs both test suites in Docker
 ├── account-service/
-│   ├── Dockerfile
-│   ├── pom.xml
 │   └── src/main/java/com/simplebank/account/
 │       ├── controller/               # REST endpoints
-│       ├── service/                  # business rules
+│       ├── service/                  # business rules + AccountOperationProcessor (idempotent)
 │       ├── repository/               # Spring Data JPA repositories
-│       ├── model/                    # JPA entities (Customer, Account)
+│       ├── model/                    # JPA entities (Customer, Account, ProcessedOperation)
 │       ├── dto/                      # request/response objects + validation
+│       ├── messaging/                # RabbitMQ topology, message records, listener
+│       ├── outbox/                   # outbox table, writer and relay
 │       └── exception/                # custom exceptions + GlobalExceptionHandler
 ├── transaction-service/
-│   ├── Dockerfile
-│   ├── pom.xml
 │   └── src/main/java/com/simplebank/transaction/
 │       ├── controller/
-│       ├── service/
+│       ├── service/                  # TransactionService + TransactionSaga
 │       ├── repository/
-│       ├── model/                    # Transaction entity, TransactionType enum
+│       ├── model/                    # Transaction, TransactionStatus, SagaStep
 │       ├── dto/
-│       ├── client/                   # AccountClient: REST calls to account-service
+│       ├── messaging/
+│       ├── outbox/
 │       └── exception/
 └── frontend/                         # Angular test console
-    ├── Dockerfile                    # builds the app, serves it with nginx
     ├── nginx.conf                    # proxies /api/* to the two services
     ├── proxy.conf.json               # same proxy for `npm start` (ng serve)
     └── src/app/
-        ├── services/                 # HTTP clients + ActivityLogService
+        ├── services/                 # HTTP clients (with status polling) + ActivityLogService
         ├── panels/                   # Customers, Accounts, Transactions forms
-        └── activity-log/             # shows every API response or error
+        └── activity-log/             # every API response, colored by status
 ```
+
+The outbox and messaging classes are intentionally duplicated in both services instead of living in a shared library: a shared library would force both services to be released together.
 
 ## Running with Docker Compose
 
-Requirements: Docker Desktop (or Docker Engine + Compose v2). You do not need Java or Maven installed: the images build the code themselves.
+Requirements: Docker Desktop (or Docker Engine + Compose v2). You do not need Java, Maven or Node installed.
 
 ```bash
 docker compose up --build
 ```
 
-The first build downloads Maven and npm dependencies and takes a few minutes. When you see `Started AccountServiceApplication` and `Started TransactionServiceApplication` in the logs, both services are ready.
+The first build downloads Maven and npm dependencies and takes a few minutes. Then open:
 
-Open **http://localhost:4200** to use the test console: register customers, open accounts, deposit, withdraw, transfer and read history. Every response (or error, with its status and field errors) appears in the "Responses" panel on the right.
+- **http://localhost:4200**: the test console. Transactions first appear in amber as `PENDING`, then a second entry shows the final status (green `COMPLETED` or red `FAILED`).
+- **http://localhost:15672** (user `simplebank`, password `simplebank`): RabbitMQ UI, to watch queues and dead letters.
 
-If port 5432 is already used by a local PostgreSQL, publish the database on another port (the services connect over the Docker network, so they are not affected):
+If a port is already taken on your machine, publish it on another one (the services talk over the Docker network, so they are not affected):
 
 ```bash
-POSTGRES_PORT=5433 docker compose up --build
+POSTGRES_PORT=5433 RABBITMQ_PORT=5673 RABBITMQ_UI_PORT=15673 docker compose up --build
 ```
 
 Stop everything:
@@ -92,60 +136,60 @@ docker compose down -v     # also delete the database volume
 Requires JDK 21 and Maven 3.9+.
 
 ```bash
-docker compose up -d postgres        # only the database
+docker compose up -d postgres rabbitmq
 cd account-service && mvn spring-boot:run
 cd transaction-service && mvn spring-boot:run   # in another terminal
+cd frontend && npm install && npm start         # optional, http://localhost:4200
 ```
 
-To run the frontend with hot reload (requires Node 20.19+ or 22.12+), with both services running:
-
-```bash
-cd frontend && npm install && npm start     # http://localhost:4200
-```
-
-Default settings in each `application.yml` point to `localhost`, so no extra configuration is needed. They can be overridden with the environment variables `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` and (transaction-service only) `ACCOUNT_SERVICE_URL`.
+Defaults in each `application.yml` point to `localhost`. Override them with `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `RABBITMQ_HOST`, `RABBITMQ_USERNAME` and `RABBITMQ_PASSWORD`.
 
 ## API
 
 ### account-service (http://localhost:8081)
 
-| Method | Path                            | Description                                |
-|--------|---------------------------------|--------------------------------------------|
-| POST   | `/api/customers`                | Register a customer                        |
-| GET    | `/api/customers/{id}`           | Get a customer                             |
-| GET    | `/api/customers/{id}/accounts`  | List a customer's accounts                 |
-| POST   | `/api/accounts`                 | Open an account for a customer             |
-| GET    | `/api/accounts/{id}`            | Get account details                        |
-| GET    | `/api/accounts/{id}/balance`    | Get account balance                        |
-| POST   | `/api/accounts/{id}/credit`     | Add money (used by transaction-service)    |
-| POST   | `/api/accounts/{id}/debit`      | Remove money (used by transaction-service) |
+| Method | Path                            | Description                    |
+|--------|---------------------------------|--------------------------------|
+| POST   | `/api/customers`                | Register a customer            |
+| GET    | `/api/customers/{id}`           | Get a customer                 |
+| GET    | `/api/customers/{id}/accounts`  | List a customer's accounts     |
+| POST   | `/api/accounts`                 | Open an account for a customer |
+| GET    | `/api/accounts/{id}`            | Get account details            |
+| GET    | `/api/accounts/{id}/balance`    | Get account balance            |
+
+Balances only change through messages from transaction-service; there is no HTTP endpoint to move money.
 
 ### transaction-service (http://localhost:8082)
 
-| Method | Path                                         | Description                           |
-|--------|----------------------------------------------|---------------------------------------|
-| POST   | `/api/transactions/deposit`                  | Deposit into an account               |
-| POST   | `/api/transactions/withdraw`                 | Withdraw from an account              |
-| POST   | `/api/transactions/transfer`                 | Transfer between two accounts         |
-| GET    | `/api/transactions/{id}`                     | Get a transaction                     |
-| GET    | `/api/transactions?accountId=1&page=0&size=20` | Transaction history (newest first)  |
+| Method | Path                                           | Description                                  |
+|--------|------------------------------------------------|----------------------------------------------|
+| POST   | `/api/transactions/deposit`                    | Start a deposit (`202`, status `PENDING`)    |
+| POST   | `/api/transactions/withdraw`                   | Start a withdrawal (`202`)                   |
+| POST   | `/api/transactions/transfer`                   | Start a transfer (`202`)                     |
+| GET    | `/api/transactions/{id}`                       | Current status of a transaction              |
+| GET    | `/api/transactions?accountId=1&page=0&size=20` | Transaction history (newest first)           |
+
+### Messages (RabbitMQ, exchange `simplebank`)
+
+| Queue                        | Producer            | Consumer            | Body                                                       |
+|------------------------------|---------------------|---------------------|------------------------------------------------------------|
+| `account-operation-commands` | transaction-service | account-service     | `{"operationId", "accountId", "type": "CREDIT"\|"DEBIT", "amount"}` |
+| `account-operation-results`  | account-service     | transaction-service | `{"operationId", "success", "failureReason"}`               |
 
 ## Example walkthrough (curl)
 
 All requests are also in [requests.http](requests.http).
 
 ```bash
-# 1. Register two customers
+# 1. Register two customers and open one account for each
 curl -s -X POST localhost:8081/api/customers -H 'Content-Type: application/json' \
   -d '{"fullName":"Ana Souza","email":"ana@example.com"}'
 curl -s -X POST localhost:8081/api/customers -H 'Content-Type: application/json' \
   -d '{"fullName":"Bruno Lima","email":"bruno@example.com"}'
-
-# 2. Open one account for each
 curl -s -X POST localhost:8081/api/accounts -H 'Content-Type: application/json' -d '{"customerId":1}'
 curl -s -X POST localhost:8081/api/accounts -H 'Content-Type: application/json' -d '{"customerId":2}'
 
-# 3. Deposit, withdraw, transfer
+# 2. Deposit, withdraw, transfer (each answers 202 with status PENDING)
 curl -s -X POST localhost:8082/api/transactions/deposit -H 'Content-Type: application/json' \
   -d '{"accountId":1,"amount":500.00}'
 curl -s -X POST localhost:8082/api/transactions/withdraw -H 'Content-Type: application/json' \
@@ -153,47 +197,51 @@ curl -s -X POST localhost:8082/api/transactions/withdraw -H 'Content-Type: appli
 curl -s -X POST localhost:8082/api/transactions/transfer -H 'Content-Type: application/json' \
   -d '{"fromAccountId":1,"toAccountId":2,"amount":100.00}'
 
-# 4. Check balances and history
-curl -s localhost:8081/api/accounts/1/balance    # 350.00
-curl -s localhost:8081/api/accounts/2/balance    # 100.00
+# 3. A moment later: final status, balances and history
+curl -s localhost:8082/api/transactions/3                  # "status": "COMPLETED"
+curl -s localhost:8081/api/accounts/1/balance               # 350.00
+curl -s localhost:8081/api/accounts/2/balance               # 100.00
 curl -s "localhost:8082/api/transactions?accountId=1"
 ```
 
 Example responses:
 
 ```json
-// POST /api/accounts
-{
-  "id": 1,
-  "accountNumber": "1000000000",
-  "balance": 0.00,
-  "customerId": 1,
-  "customerName": "Ana Souza",
-  "createdAt": "2026-10-20T13:00:00.000Z"
-}
-
-// POST /api/transactions/transfer
+// POST /api/transactions/transfer  (202 Accepted)
 {
   "id": 3,
   "type": "TRANSFER",
+  "status": "PENDING",
   "sourceAccountId": 1,
   "targetAccountId": 2,
   "amount": 100.00,
   "createdAt": "2026-10-20T13:05:00.000Z"
 }
+
+// GET /api/transactions/4  (a transfer to an account that does not exist)
+{
+  "id": 4,
+  "type": "TRANSFER",
+  "status": "FAILED",
+  "sourceAccountId": 1,
+  "targetAccountId": 999,
+  "amount": 20.00,
+  "failureReason": "Account not found with id 999. Amount refunded to source account",
+  "createdAt": "2026-10-20T13:06:00.000Z"
+}
 ```
 
 ## Error handling
 
-Each service has a `GlobalExceptionHandler` (`@RestControllerAdvice`) that turns exceptions into a consistent JSON body:
+HTTP errors use a consistent JSON body produced by each service's `GlobalExceptionHandler`:
 
 ```json
 {
   "timestamp": "2026-10-20T13:10:00.000Z",
-  "status": 422,
-  "error": "Unprocessable Entity",
-  "message": "Insufficient funds in account 1000000000",
-  "path": "/api/transactions/withdraw"
+  "status": 404,
+  "error": "Not Found",
+  "message": "Account not found with id 999",
+  "path": "/api/accounts/999"
 }
 ```
 
@@ -204,67 +252,64 @@ Validation errors also include a `fieldErrors` map, for example `{"amount": "Amo
 | 400    | Invalid body, missing field, negative amount, bad path parameter  |
 | 404    | Customer, account or transaction not found                        |
 | 409    | Email already registered                                          |
-| 422    | Insufficient funds, transfer to the same account                  |
-| 503    | transaction-service cannot reach account-service                  |
+| 422    | Transfer to the same account                                      |
 | 500    | Unexpected error (details are logged, not returned)               |
 
-When account-service returns an error, `AccountClient` reads its message and rethrows it as the matching exception, so the client of transaction-service sees the same message.
+Problems found while the saga runs (insufficient funds, unknown account) are not HTTP errors: the request was accepted, and the transaction ends as `FAILED` with a `failureReason`.
 
 ## Testing
 
-Each service has four kinds of tests, written with JUnit 5, Mockito, AssertJ and Spring Boot Test:
-
-| Kind              | Tools                                   | What it covers                                                                 |
-|-------------------|-----------------------------------------|--------------------------------------------------------------------------------|
-| Unit              | JUnit + Mockito                         | Services and entities in isolation (repositories and `AccountClient` mocked)   |
-| Web layer         | `@WebMvcTest` + MockMvc + `@MockitoBean` | Endpoints, status codes, validation messages, `GlobalExceptionHandler`         |
-| HTTP client       | `MockRestServiceServer`                 | `AccountClient` request format and how each error status is translated         |
-| Integration       | `@SpringBootTest` + Testcontainers      | Real PostgreSQL: Flyway migrations, DB constraints, paging, row locking        |
-
-The integration tests start a throwaway PostgreSQL container, so **Docker must be running**. Highlights worth reading:
-
-- `AccountServiceIntegrationTest.concurrentDebitsNeverOverdrawTheAccount`: 10 parallel debits of 20.00 against a balance of 100.00; exactly 5 succeed thanks to the pessimistic lock.
-- `TransactionServiceTest.transferRefundsSourceWhenCreditFails`: the compensation logic of a transfer.
-
-Run all tests without installing Java or Maven (uses a Maven container):
+Run everything without installing Java or Maven (uses a Maven container; Docker must be running):
 
 ```bash
-./run-tests.sh                      # both services
-./run-tests.sh transaction-service  # just one
+./run-tests.sh
 ```
 
-Or, with JDK 21 and Maven installed: `cd account-service && mvn test`.
+| Kind        | Tools                                     | What it covers                                                                  |
+|-------------|-------------------------------------------|---------------------------------------------------------------------------------|
+| Unit        | JUnit 5 + Mockito + AssertJ               | Saga transitions, idempotent processor, outbox relay, services, entities        |
+| Web layer   | `@WebMvcTest` + MockMvc + `@MockitoBean`  | Endpoints, status codes, validation messages, `GlobalExceptionHandler`          |
+| Integration | `@SpringBootTest` + Testcontainers        | Real PostgreSQL and RabbitMQ: migrations, constraints, row locks, message flow  |
+| Contract    | Pact (message pacts)                      | The JSON each service sends matches what the other one expects                  |
+
+Highlights worth reading:
+
+- [TransactionSagaTest](transaction-service/src/test/java/com/simplebank/transaction/service/TransactionSagaTest.java): every saga transition, including the refund and a refund that fails.
+- [TransactionSagaIntegrationTest](transaction-service/src/test/java/com/simplebank/transaction/messaging/TransactionSagaIntegrationTest.java): the test plays account-service over real RabbitMQ.
+- [AccountOperationMessagingIntegrationTest](account-service/src/test/java/com/simplebank/account/messaging/AccountOperationMessagingIntegrationTest.java): a duplicated command is applied once.
+- `AccountServiceIntegrationTest.concurrentDebitsNeverOverdrawTheAccount`: 10 parallel debits of 20.00 against 100.00; exactly 5 succeed thanks to the row lock.
+
+### Contract tests
+
+Each service is the **consumer** of one message and the **provider** of the other:
+
+- account-service consumes commands: `AccountOperationCommandConsumerPactTest` writes `pacts/account-service-transaction-service.json`, and transaction-service's `AccountOperationCommandProviderPactTest` checks that the commands the saga really builds match it.
+- transaction-service consumes results: the same in the other direction.
+
+`run-tests.sh` runs all consumer tests first (regenerating `/pacts`), then every suite. The pact files are committed, so a change in a message format shows up in the diff. If you rename a field on one side only, the provider test fails with something like `Actual map is missing the following keys: accountId`.
 
 ## Database migrations
 
-The schema is managed by [Flyway](https://documentation.red-gate.com/flyway), not by Hibernate. Each service applies its own SQL scripts on startup:
+The schema is managed by [Flyway](https://documentation.red-gate.com/flyway). Hibernate runs with `ddl-auto: validate`: it never changes the database, it only checks on startup that the entities match the tables.
 
 ```
-account-service/src/main/resources/db/migration/V1__create_customers_and_accounts.sql
-transaction-service/src/main/resources/db/migration/V1__create_transactions.sql
+account-service/src/main/resources/db/migration/
+  V1__create_customers_and_accounts.sql
+  V2__create_account_number_sequence.sql
+  V3__create_processed_operations_and_outbox.sql
+transaction-service/src/main/resources/db/migration/
+  V1__create_transactions.sql
+  V2__add_saga_state_and_outbox.sql
 ```
 
-Hibernate runs with `ddl-auto: validate`: it never changes the database, it only checks on startup that the entities match the tables, and the service fails to start if they don't.
-
-To change the schema, add a new file with the next version number (for example `V2__add_phone_to_customers.sql`) and update the entity. Never edit a migration that has already run; Flyway stores a checksum of each applied script in `flyway_schema_history` and will refuse to start if it changes.
-
-To start from an empty database: `docker compose down -v`.
-
-## How a transfer works
-
-1. Reject the request if source and destination are the same account.
-2. Check that the destination account exists (fail before moving any money).
-3. Debit the source account. account-service locks the row and checks the balance.
-4. Credit the destination account.
-5. If step 4 fails, credit the source account back (a simple compensation).
-6. Save the transaction record.
+To change the schema, add a new file with the next version number and update the entity. Never edit a migration that has already run; Flyway stores a checksum of each applied script and refuses to start if it changes. To start from an empty database: `docker compose down -v`.
 
 ## Design notes and limitations
 
-These are deliberate simplifications to keep the project easy to follow:
-
-- **Distributed consistency**: the transfer uses a basic compensating refund. If the transaction-service crashes between steps, balances and history can drift. Real systems use patterns like Saga or the Outbox pattern.
-- **CORS**: the frontend calls `/api/...` on its own origin and nginx (or the Angular dev proxy) forwards the request, so the backends need no CORS configuration.
-- **Security**: there is no authentication. The `credit`/`debit` endpoints are public here; in a real deployment they would only be reachable by internal services.
-- **Concurrency**: account balance updates use a pessimistic row lock, so two simultaneous withdrawals cannot overdraw an account.
+- **Eventual consistency**: right after a `202`, the balance has not changed yet. Clients must read the transaction status.
+- **Account validation happens inside the saga**: a deposit to an account that does not exist is accepted (`202`) and ends as `FAILED`. This keeps transaction-service independent from account-service being online.
+- **Refund failure** needs a human: if the refund of a transfer also fails, the transaction is marked `FAILED` with "Manual review required" and an error is logged. With no way to delete accounts this cannot happen today, but the path is handled.
+- **Outbox rows are never deleted**: fine for a study project; a real system would clean up sent rows periodically.
+- **Topology is declared by both services** (exchange, queues, dead-letter queues), so neither depends on the other starting first. Names and arguments must stay identical in both `MessagingConfig` classes.
+- **Security**: there is no authentication, and RabbitMQ uses a single user.
 - **Money**: amounts use `BigDecimal` with 2 decimal places, never `double`.

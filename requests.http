@@ -50,6 +50,9 @@ GET {{accountUrl}}/api/accounts/1/balance
 ### 8. List the accounts of a customer
 GET {{accountUrl}}/api/customers/1/accounts
 
+### Transactions are asynchronous: each POST answers 202 with status PENDING.
+### Use request 12 a moment later to see COMPLETED or FAILED (with failureReason).
+
 ### 9. Deposit 500.00 into account 1
 POST {{transactionUrl}}/api/transactions/deposit
 Content-Type: application/json
@@ -95,13 +98,33 @@ Content-Type: application/json
   "amount": -10
 }
 
-### Insufficient funds (422)
+### Insufficient funds (202, then the transaction ends FAILED)
 POST {{transactionUrl}}/api/transactions/withdraw
 Content-Type: application/json
 
 {
   "accountId": 2,
   "amount": 999999.00
+}
+
+### Transfer to an account that does not exist (ends FAILED, money refunded)
+POST {{transactionUrl}}/api/transactions/transfer
+Content-Type: application/json
+
+{
+  "fromAccountId": 1,
+  "toAccountId": 999,
+  "amount": 10.00
+}
+
+### Same source and destination (422)
+POST {{transactionUrl}}/api/transactions/transfer
+Content-Type: application/json
+
+{
+  "fromAccountId": 1,
+  "toAccountId": 1,
+  "amount": 10.00
 }
 
 ### Account not found (404)
