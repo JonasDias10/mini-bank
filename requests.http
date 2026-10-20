@@ -1,0 +1,117 @@
+### Example requests for SimpleBank.
+### Open in VS Code (REST Client extension) or IntelliJ and click "Send Request".
+
+@accountUrl = http://localhost:8081
+@transactionUrl = http://localhost:8082
+
+### 1. Register a customer
+POST {{accountUrl}}/api/customers
+Content-Type: application/json
+
+{
+  "fullName": "Ana Souza",
+  "email": "ana@example.com"
+}
+
+### 2. Register a second customer
+POST {{accountUrl}}/api/customers
+Content-Type: application/json
+
+{
+  "fullName": "Bruno Lima",
+  "email": "bruno@example.com"
+}
+
+### 3. Get a customer
+GET {{accountUrl}}/api/customers/1
+
+### 4. Open an account for customer 1
+POST {{accountUrl}}/api/accounts
+Content-Type: application/json
+
+{
+  "customerId": 1
+}
+
+### 5. Open an account for customer 2
+POST {{accountUrl}}/api/accounts
+Content-Type: application/json
+
+{
+  "customerId": 2
+}
+
+### 6. Get account details
+GET {{accountUrl}}/api/accounts/1
+
+### 7. Get account balance
+GET {{accountUrl}}/api/accounts/1/balance
+
+### 8. List the accounts of a customer
+GET {{accountUrl}}/api/customers/1/accounts
+
+### 9. Deposit 500.00 into account 1
+POST {{transactionUrl}}/api/transactions/deposit
+Content-Type: application/json
+
+{
+  "accountId": 1,
+  "amount": 500.00
+}
+
+### 10. Withdraw 50.00 from account 1
+POST {{transactionUrl}}/api/transactions/withdraw
+Content-Type: application/json
+
+{
+  "accountId": 1,
+  "amount": 50.00
+}
+
+### 11. Transfer 100.00 from account 1 to account 2
+POST {{transactionUrl}}/api/transactions/transfer
+Content-Type: application/json
+
+{
+  "fromAccountId": 1,
+  "toAccountId": 2,
+  "amount": 100.00
+}
+
+### 12. Get a transaction
+GET {{transactionUrl}}/api/transactions/1
+
+### 13. Transaction history of account 1 (newest first, paginated)
+GET {{transactionUrl}}/api/transactions?accountId=1&page=0&size=20
+
+### --- Error examples ---
+
+### Validation error (400)
+POST {{transactionUrl}}/api/transactions/deposit
+Content-Type: application/json
+
+{
+  "accountId": 1,
+  "amount": -10
+}
+
+### Insufficient funds (422)
+POST {{transactionUrl}}/api/transactions/withdraw
+Content-Type: application/json
+
+{
+  "accountId": 2,
+  "amount": 999999.00
+}
+
+### Account not found (404)
+GET {{accountUrl}}/api/accounts/999
+
+### Duplicate email (409)
+POST {{accountUrl}}/api/customers
+Content-Type: application/json
+
+{
+  "fullName": "Ana Again",
+  "email": "ana@example.com"
+}
