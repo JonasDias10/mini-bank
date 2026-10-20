@@ -1,6 +1,7 @@
 import { Component, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import type { AccountOperationRequest, TransferRequest } from '../models';
+import type { Observable } from 'rxjs';
+import type { AccountOperationRequest, TransactionResponse, TransferRequest } from '../models';
 import { ActivityLogService } from '../services/activity-log.service';
 import { TransactionApiService } from '../services/transaction-api.service';
 
@@ -55,16 +56,16 @@ export class TransactionsPanelComponent {
   transactionId: number | null = null;
 
   handleDeposit(): void {
-    this.log.run(`Deposit into account ${this.operation.accountId}`, this.api.deposit({ ...this.operation }));
+    this.submit(`Deposit into account ${this.operation.accountId}`, this.api.deposit({ ...this.operation }));
   }
 
   handleWithdraw(): void {
-    this.log.run(`Withdraw from account ${this.operation.accountId}`, this.api.withdraw({ ...this.operation }));
+    this.submit(`Withdraw from account ${this.operation.accountId}`, this.api.withdraw({ ...this.operation }));
   }
 
   handleTransfer(): void {
     const { fromAccountId, toAccountId } = this.transfer;
-    this.log.run(`Transfer ${fromAccountId} -> ${toAccountId}`, this.api.transfer({ ...this.transfer }));
+    this.submit(`Transfer ${fromAccountId} -> ${toAccountId}`, this.api.transfer({ ...this.transfer }));
   }
 
   handleHistory(): void {
@@ -76,5 +77,9 @@ export class TransactionsPanelComponent {
 
   handleFind(): void {
     this.log.run(`Get transaction ${this.transactionId}`, this.api.getTransaction(this.transactionId));
+  }
+
+  private submit(label: string, request: Observable<TransactionResponse>): void {
+    this.log.run(label, this.api.trackUntilSettled(request));
   }
 }

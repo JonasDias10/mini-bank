@@ -14,18 +14,18 @@ import { ActivityLogService } from '../services/activity-log.service';
       </header>
 
       @for (entry of log.entries(); track entry.id) {
-        <article [class.success]="entry.isSuccess" [class.failure]="!entry.isSuccess">
+        <article [class]="entry.tone">
           <div class="entry-title">
             <strong>{{ entry.label }}</strong>
-            <span>{{ entry.isSuccess ? 'OK' : entry.error?.status }} · {{ entry.time | date: 'HH:mm:ss' }}</span>
+            <span>{{ entry.tag }} · {{ entry.time | date: 'HH:mm:ss' }}</span>
           </div>
-          @if (entry.isSuccess) {
-            <pre>{{ entry.data | json }}</pre>
-          } @else {
-            <p>{{ entry.error?.message }}</p>
-            @if (entry.error?.fieldErrors; as fieldErrors) {
+          @if (entry.error; as error) {
+            <p>{{ error.message }}</p>
+            @if (error.fieldErrors; as fieldErrors) {
               <pre>{{ fieldErrors | json }}</pre>
             }
+          } @else {
+            <pre>{{ entry.data | json }}</pre>
           }
         </article>
       } @empty {

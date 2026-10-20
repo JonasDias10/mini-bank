@@ -27,12 +27,16 @@ export interface BalanceResponse {
 
 export type TransactionType = 'DEPOSIT' | 'WITHDRAWAL' | 'TRANSFER';
 
+export type TransactionStatus = 'PENDING' | 'COMPLETED' | 'FAILED';
+
 export interface TransactionResponse {
   id: number;
   type: TransactionType;
+  status: TransactionStatus;
   sourceAccountId?: number;
   targetAccountId?: number;
   amount: number;
+  failureReason?: string;
   createdAt: string;
 }
 
