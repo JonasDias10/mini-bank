@@ -3,9 +3,9 @@ package com.simplebank.transaction.controller;
 import com.simplebank.transaction.dto.AccountOperationRequest;
 import com.simplebank.transaction.dto.TransactionResponse;
 import com.simplebank.transaction.dto.TransferRequest;
-import com.simplebank.transaction.exception.AccountServiceUnavailableException;
 import com.simplebank.transaction.exception.BusinessException;
 import com.simplebank.transaction.exception.ResourceNotFoundException;
+import com.simplebank.transaction.model.TransactionStatus;
 import com.simplebank.transaction.model.TransactionType;
 import com.simplebank.transaction.service.TransactionService;
 import org.junit.jupiter.api.Test;
@@ -57,15 +57,17 @@ class TransactionControllerTest {
     }
 
     @Test
-    void depositReturns201AndOmitsNullAccount() throws Exception {
+    void depositReturns202WithPendingTransaction() throws Exception {
         when(transactionService.deposit(new AccountOperationRequest(1L, AMOUNT)))
-                .thenReturn(new TransactionResponse(7L, TransactionType.DEPOSIT, null, 1L, AMOUNT, CREATED_AT));
+                .thenReturn(new TransactionResponse(7L, TransactionType.DEPOSIT, TransactionStatus.PENDING, null, 1L, AMOUNT, null, CREATED_AT));
 
         postJson("/api/transactions/deposit", """
                 {"accountId": 1, "amount": 100.00}
                 """)
-                .andExpect(status().isCreated())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.id").value(7))
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andExpect(jsonPath("$.failureReason").doesNotExist())
                 .andExpect(jsonPath("$.type").value("DEPOSIT"))
                 .andExpect(jsonPath("$.targetAccountId").value(1))
                 .andExpect(jsonPath("$.sourceAccountId").doesNotExist());
@@ -91,26 +93,26 @@ class TransactionControllerTest {
     }
 
     @Test
-    void withdrawReturns422WhenFundsAreInsufficient() throws Exception {
-        when(transactionService.withdraw(any()))
-                .thenThrow(new BusinessException("Insufficient funds in account 1000000000"));
+    void transferReturns422WhenAccountsAreTheSame() throws Exception {
+        when(transactionService.transfer(any()))
+                .thenThrow(new BusinessException("Source and destination accounts must be different"));
 
-        postJson("/api/transactions/withdraw", """
-                {"accountId": 1, "amount": 100.00}
+        postJson("/api/transactions/transfer", """
+                {"fromAccountId": 1, "toAccountId": 1, "amount": 100.00}
                 """)
                 .andExpect(status().isUnprocessableEntity())
-                .andExpect(jsonPath("$.message").value("Insufficient funds in account 1000000000"));
+                .andExpect(jsonPath("$.message").value("Source and destination accounts must be different"));
     }
 
     @Test
-    void transferReturns201() throws Exception {
+    void transferReturns202() throws Exception {
         when(transactionService.transfer(new TransferRequest(1L, 2L, AMOUNT)))
-                .thenReturn(new TransactionResponse(8L, TransactionType.TRANSFER, 1L, 2L, AMOUNT, CREATED_AT));
+                .thenReturn(new TransactionResponse(8L, TransactionType.TRANSFER, TransactionStatus.PENDING, 1L, 2L, AMOUNT, null, CREATED_AT));
 
         postJson("/api/transactions/transfer", """
                 {"fromAccountId": 1, "toAccountId": 2, "amount": 100.00}
                 """)
-                .andExpect(status().isCreated())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.type").value("TRANSFER"))
                 .andExpect(jsonPath("$.sourceAccountId").value(1))
                 .andExpect(jsonPath("$.targetAccountId").value(2));
@@ -126,33 +128,9 @@ class TransactionControllerTest {
     }
 
     @Test
-    void transferReturns404WhenAccountDoesNotExist() throws Exception {
-        when(transactionService.transfer(any()))
-                .thenThrow(new ResourceNotFoundException("Account not found with id 2"));
-
-        postJson("/api/transactions/transfer", """
-                {"fromAccountId": 1, "toAccountId": 2, "amount": 100.00}
-                """)
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.message").value("Account not found with id 2"));
-    }
-
-    @Test
-    void transferReturns503WhenAccountServiceIsDown() throws Exception {
-        when(transactionService.transfer(any()))
-                .thenThrow(new AccountServiceUnavailableException("Account service is unavailable, please try again later"));
-
-        postJson("/api/transactions/transfer", """
-                {"fromAccountId": 1, "toAccountId": 2, "amount": 100.00}
-                """)
-                .andExpect(status().isServiceUnavailable())
-                .andExpect(jsonPath("$.status").value(503));
-    }
-
-    @Test
     void getTransactionReturns200() throws Exception {
         when(transactionService.getTransaction(7L))
-                .thenReturn(new TransactionResponse(7L, TransactionType.WITHDRAWAL, 1L, null, AMOUNT, CREATED_AT));
+                .thenReturn(new TransactionResponse(7L, TransactionType.WITHDRAWAL, TransactionStatus.PENDING, 1L, null, AMOUNT, null, CREATED_AT));
 
         mockMvc.perform(get("/api/transactions/7"))
                 .andExpect(status().isOk())
@@ -187,7 +165,7 @@ class TransactionControllerTest {
     @Test
     void historyUsesDefaultPagingNewestFirst() throws Exception {
         when(transactionService.getTransactionsByAccount(eq(1L), any())).thenReturn(List.of(
-                new TransactionResponse(2L, TransactionType.WITHDRAWAL, 1L, null, AMOUNT, CREATED_AT)));
+                new TransactionResponse(2L, TransactionType.WITHDRAWAL, TransactionStatus.PENDING, 1L, null, AMOUNT, null, CREATED_AT)));
 
         mockMvc.perform(get("/api/transactions").param("accountId", "1"))
                 .andExpect(status().isOk())

@@ -1,13 +1,16 @@
 package com.simplebank.transaction.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.simplebank.transaction.TestcontainersConfiguration;
-import com.simplebank.transaction.client.AccountClient;
 import com.simplebank.transaction.dto.AccountOperationRequest;
 import com.simplebank.transaction.dto.TransactionResponse;
 import com.simplebank.transaction.dto.TransferRequest;
-import com.simplebank.transaction.exception.BusinessException;
+import com.simplebank.transaction.messaging.AccountOperationCommand;
 import com.simplebank.transaction.model.Transaction;
+import com.simplebank.transaction.model.TransactionStatus;
 import com.simplebank.transaction.model.TransactionType;
+import com.simplebank.transaction.outbox.OutboxMessage;
+import com.simplebank.transaction.outbox.OutboxRepository;
 import com.simplebank.transaction.repository.TransactionRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -18,17 +21,16 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.math.BigDecimal;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.doThrow;
 
-// Real PostgreSQL via Testcontainers; only the HTTP calls to account-service are mocked.
-@SpringBootTest
+// Real PostgreSQL: persistence, the outbox write and DB constraints. The relay is slowed down so the
+// outbox rows can be inspected before they are published.
+@SpringBootTest(properties = "outbox.relay-interval-ms=3600000")
 @Import(TestcontainersConfiguration.class)
 class TransactionServiceIntegrationTest {
 
@@ -41,11 +43,15 @@ class TransactionServiceIntegrationTest {
     @Autowired
     private TransactionRepository transactionRepository;
 
-    @MockitoBean
-    private AccountClient accountClient;
+    @Autowired
+    private OutboxRepository outboxRepository;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @AfterEach
     void cleanUp() {
+        outboxRepository.deleteAll();
         transactionRepository.deleteAll();
     }
 
@@ -56,14 +62,18 @@ class TransactionServiceIntegrationTest {
     }
 
     @Test
-    void depositIsPersisted() {
+    void depositIsSavedAsPendingTogetherWithItsFirstCommand() throws Exception {
         TransactionResponse deposit = transactionService.deposit(new AccountOperationRequest(1L, AMOUNT));
 
-        TransactionResponse stored = transactionService.getTransaction(deposit.id());
+        Transaction stored = transactionRepository.findById(deposit.id()).orElseThrow();
+        List<OutboxMessage> outbox = outboxRepository.findAll();
+        AccountOperationCommand command = objectMapper.readValue(outbox.getFirst().getPayload(),
+                AccountOperationCommand.class);
 
-        assertThat(stored.type()).isEqualTo(TransactionType.DEPOSIT);
-        assertThat(stored.amount()).isEqualByComparingTo(AMOUNT);
-        assertThat(stored.createdAt()).isNotNull();
+        assertThat(stored.getStatus()).isEqualTo(TransactionStatus.PENDING);
+        assertThat(outbox).hasSize(1);
+        assertThat(command.operationId()).isEqualTo(stored.getCurrentOperationId());
+        assertThat(command.amount()).isEqualByComparingTo(AMOUNT);
     }
 
     @Test
@@ -79,16 +89,6 @@ class TransactionServiceIntegrationTest {
                 .containsExactly(TransactionType.WITHDRAWAL, TransactionType.TRANSFER);
         assertThat(historyTypes(1L, PageRequest.of(1, 1, NEWEST_FIRST)))
                 .containsExactly(TransactionType.DEPOSIT);
-    }
-
-    @Test
-    void failedOperationPersistsNothing() {
-        doThrow(new BusinessException("Insufficient funds")).when(accountClient).debit(1L, AMOUNT);
-
-        assertThatThrownBy(() -> transactionService.withdraw(new AccountOperationRequest(1L, AMOUNT)))
-                .isInstanceOf(BusinessException.class);
-
-        assertThat(transactionRepository.count()).isZero();
     }
 
     @Test

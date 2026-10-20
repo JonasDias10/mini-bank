@@ -2,10 +2,10 @@ package com.simplebank.account.service;
 
 import com.simplebank.account.dto.AccountResponse;
 import com.simplebank.account.dto.BalanceResponse;
-import com.simplebank.account.exception.InsufficientFundsException;
 import com.simplebank.account.exception.ResourceNotFoundException;
 import com.simplebank.account.model.Account;
 import com.simplebank.account.model.Customer;
+import com.simplebank.account.model.OperationType;
 import com.simplebank.account.repository.AccountRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -123,58 +123,58 @@ class AccountServiceTest {
     }
 
     @Test
-    void creditLocksAccountAndAddsAmount() {
-        when(accountRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(accountWithBalance("100.00")));
+    void applyOperationCreditsLockedAccount() {
+        Account account = accountWithBalance("100.00");
+        when(accountRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(account));
 
-        AccountResponse response = accountService.credit(10L, new BigDecimal("50.00"));
+        OperationResult result = accountService.applyOperation(10L, OperationType.CREDIT, new BigDecimal("50.00"));
 
-        assertThat(response.balance()).isEqualByComparingTo("150.00");
+        assertThat(result.success()).isTrue();
+        assertThat(account.getBalance()).isEqualByComparingTo("150.00");
         verify(accountRepository, never()).findById(any());
     }
 
     @Test
-    void creditThrowsWhenAccountNotFound() {
-        when(accountRepository.findByIdForUpdate(99L)).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> accountService.credit(99L, BigDecimal.TEN))
-                .isInstanceOf(ResourceNotFoundException.class);
-    }
-
-    @Test
-    void debitSubtractsAmount() {
-        when(accountRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(accountWithBalance("100.00")));
-
-        AccountResponse response = accountService.debit(10L, new BigDecimal("40.00"));
-
-        assertThat(response.balance()).isEqualByComparingTo("60.00");
-    }
-
-    @Test
-    void debitAllowsWithdrawingTheWholeBalance() {
-        when(accountRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(accountWithBalance("100.00")));
-
-        AccountResponse response = accountService.debit(10L, new BigDecimal("100.00"));
-
-        assertThat(response.balance()).isEqualByComparingTo("0");
-    }
-
-    @Test
-    void debitRejectsAmountAboveBalanceAndKeepsBalance() {
+    void applyOperationDebitsAccount() {
         Account account = accountWithBalance("100.00");
         when(accountRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(account));
 
-        assertThatThrownBy(() -> accountService.debit(10L, new BigDecimal("100.01")))
-                .isInstanceOf(InsufficientFundsException.class)
-                .hasMessage("Insufficient funds in account 1000000000");
+        OperationResult result = accountService.applyOperation(10L, OperationType.DEBIT, new BigDecimal("40.00"));
 
+        assertThat(result.success()).isTrue();
+        assertThat(account.getBalance()).isEqualByComparingTo("60.00");
+    }
+
+    @Test
+    void applyOperationAllowsDebitingTheWholeBalance() {
+        Account account = accountWithBalance("100.00");
+        when(accountRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(account));
+
+        OperationResult result = accountService.applyOperation(10L, OperationType.DEBIT, new BigDecimal("100.00"));
+
+        assertThat(result.success()).isTrue();
+        assertThat(account.getBalance()).isEqualByComparingTo("0");
+    }
+
+    @Test
+    void applyOperationFailsDebitAboveBalanceAndKeepsBalance() {
+        Account account = accountWithBalance("100.00");
+        when(accountRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(account));
+
+        OperationResult result = accountService.applyOperation(10L, OperationType.DEBIT, new BigDecimal("100.01"));
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.failureReason()).isEqualTo("Insufficient funds in account 1000000000");
         assertThat(account.getBalance()).isEqualByComparingTo("100.00");
     }
 
     @Test
-    void debitThrowsWhenAccountNotFound() {
+    void applyOperationFailsWhenAccountNotFound() {
         when(accountRepository.findByIdForUpdate(99L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> accountService.debit(99L, BigDecimal.TEN))
-                .isInstanceOf(ResourceNotFoundException.class);
+        OperationResult result = accountService.applyOperation(99L, OperationType.CREDIT, BigDecimal.TEN);
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.failureReason()).isEqualTo("Account not found with id 99");
     }
 }

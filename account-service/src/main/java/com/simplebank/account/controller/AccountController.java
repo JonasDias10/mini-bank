@@ -1,7 +1,6 @@
 package com.simplebank.account.controller;
 
 import com.simplebank.account.dto.AccountResponse;
-import com.simplebank.account.dto.AmountRequest;
 import com.simplebank.account.dto.BalanceResponse;
 import com.simplebank.account.dto.CreateAccountRequest;
 import com.simplebank.account.service.AccountService;
@@ -39,16 +38,5 @@ public class AccountController {
     @GetMapping("/{id}/balance")
     public BalanceResponse getBalance(@PathVariable Long id) {
         return accountService.getBalance(id);
-    }
-
-    // Called by transaction-service to move money in or out of an account.
-    @PostMapping("/{id}/credit")
-    public AccountResponse credit(@PathVariable Long id, @Valid @RequestBody AmountRequest request) {
-        return accountService.credit(id, request.amount());
-    }
-
-    @PostMapping("/{id}/debit")
-    public AccountResponse debit(@PathVariable Long id, @Valid @RequestBody AmountRequest request) {
-        return accountService.debit(id, request.amount());
     }
 }

@@ -1,13 +1,12 @@
 package com.simplebank.transaction.service;
 
-import com.simplebank.transaction.client.AccountClient;
 import com.simplebank.transaction.dto.AccountOperationRequest;
 import com.simplebank.transaction.dto.TransactionResponse;
 import com.simplebank.transaction.dto.TransferRequest;
-import com.simplebank.transaction.exception.AccountServiceUnavailableException;
 import com.simplebank.transaction.exception.BusinessException;
 import com.simplebank.transaction.exception.ResourceNotFoundException;
 import com.simplebank.transaction.model.Transaction;
+import com.simplebank.transaction.model.TransactionStatus;
 import com.simplebank.transaction.model.TransactionType;
 import com.simplebank.transaction.repository.TransactionRepository;
 import org.junit.jupiter.api.Test;
@@ -28,9 +27,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -44,7 +41,7 @@ class TransactionServiceTest {
     private TransactionRepository transactionRepository;
 
     @Mock
-    private AccountClient accountClient;
+    private TransactionSaga transactionSaga;
 
     @InjectMocks
     private TransactionService transactionService;
@@ -53,142 +50,56 @@ class TransactionServiceTest {
         when(transactionRepository.save(any(Transaction.class))).thenAnswer(invocation -> invocation.getArgument(0));
     }
 
-    private Transaction savedTransaction() {
+    private Transaction startedTransaction() {
         ArgumentCaptor<Transaction> captor = ArgumentCaptor.forClass(Transaction.class);
-        verify(transactionRepository).save(captor.capture());
+        verify(transactionSaga).start(captor.capture());
         return captor.getValue();
     }
 
     @Test
-    void depositCreditsAccountThenRecordsTransaction() {
+    void depositSavesPendingTransactionThenStartsSaga() {
         stubSave();
 
         TransactionResponse response = transactionService.deposit(new AccountOperationRequest(1L, AMOUNT));
 
-        InOrder order = inOrder(accountClient, transactionRepository);
-        order.verify(accountClient).credit(1L, AMOUNT);
+        InOrder order = inOrder(transactionRepository, transactionSaga);
         order.verify(transactionRepository).save(any(Transaction.class));
+        order.verify(transactionSaga).start(any(Transaction.class));
+        assertThat(response.status()).isEqualTo(TransactionStatus.PENDING);
         assertThat(response.type()).isEqualTo(TransactionType.DEPOSIT);
         assertThat(response.targetAccountId()).isEqualTo(1L);
-        assertThat(response.sourceAccountId()).isNull();
-        assertThat(response.amount()).isEqualByComparingTo(AMOUNT);
     }
 
     @Test
-    void depositRecordsNothingWhenCreditFails() {
-        doThrow(new ResourceNotFoundException("Account not found with id 1")).when(accountClient).credit(1L, AMOUNT);
-
-        assertThatThrownBy(() -> transactionService.deposit(new AccountOperationRequest(1L, AMOUNT)))
-                .isInstanceOf(ResourceNotFoundException.class);
-
-        verifyNoInteractions(transactionRepository);
-    }
-
-    @Test
-    void withdrawDebitsAccountThenRecordsTransaction() {
+    void withdrawStartsWithdrawalSaga() {
         stubSave();
 
-        TransactionResponse response = transactionService.withdraw(new AccountOperationRequest(1L, AMOUNT));
+        transactionService.withdraw(new AccountOperationRequest(1L, AMOUNT));
 
-        verify(accountClient).debit(1L, AMOUNT);
-        assertThat(response.type()).isEqualTo(TransactionType.WITHDRAWAL);
-        assertThat(response.sourceAccountId()).isEqualTo(1L);
-        assertThat(response.targetAccountId()).isNull();
+        Transaction started = startedTransaction();
+        assertThat(started.getType()).isEqualTo(TransactionType.WITHDRAWAL);
+        assertThat(started.getSourceAccountId()).isEqualTo(1L);
     }
 
     @Test
-    void withdrawRecordsNothingWhenFundsAreInsufficient() {
-        doThrow(new BusinessException("Insufficient funds")).when(accountClient).debit(1L, AMOUNT);
-
-        assertThatThrownBy(() -> transactionService.withdraw(new AccountOperationRequest(1L, AMOUNT)))
-                .isInstanceOf(BusinessException.class);
-
-        verifyNoInteractions(transactionRepository);
-    }
-
-    @Test
-    void transferChecksDestinationDebitsSourceCreditsDestinationThenRecords() {
-        stubSave();
-
-        TransactionResponse response = transactionService.transfer(new TransferRequest(1L, 2L, AMOUNT));
-
-        InOrder order = inOrder(accountClient, transactionRepository);
-        order.verify(accountClient).assertAccountExists(2L);
-        order.verify(accountClient).debit(1L, AMOUNT);
-        order.verify(accountClient).credit(2L, AMOUNT);
-        order.verify(transactionRepository).save(any(Transaction.class));
-        assertThat(response.type()).isEqualTo(TransactionType.TRANSFER);
-        assertThat(response.sourceAccountId()).isEqualTo(1L);
-        assertThat(response.targetAccountId()).isEqualTo(2L);
-    }
-
-    @Test
-    void transferToSameAccountIsRejectedBeforeAnyCall() {
-        assertThatThrownBy(() -> transactionService.transfer(new TransferRequest(1L, 1L, AMOUNT)))
-                .isInstanceOf(BusinessException.class)
-                .hasMessage("Source and destination accounts must be different");
-
-        verifyNoInteractions(accountClient, transactionRepository);
-    }
-
-    @Test
-    void transferToMissingAccountDoesNotMoveMoney() {
-        doThrow(new ResourceNotFoundException("Account not found with id 2"))
-                .when(accountClient).assertAccountExists(2L);
-
-        assertThatThrownBy(() -> transactionService.transfer(new TransferRequest(1L, 2L, AMOUNT)))
-                .isInstanceOf(ResourceNotFoundException.class);
-
-        verify(accountClient, never()).debit(any(), any());
-        verify(accountClient, never()).credit(any(), any());
-        verifyNoInteractions(transactionRepository);
-    }
-
-    @Test
-    void transferStopsWhenDebitFails() {
-        doThrow(new BusinessException("Insufficient funds")).when(accountClient).debit(1L, AMOUNT);
-
-        assertThatThrownBy(() -> transactionService.transfer(new TransferRequest(1L, 2L, AMOUNT)))
-                .isInstanceOf(BusinessException.class);
-
-        verify(accountClient, never()).credit(any(), any());
-        verifyNoInteractions(transactionRepository);
-    }
-
-    @Test
-    void transferRefundsSourceWhenCreditFails() {
-        AccountServiceUnavailableException creditError = new AccountServiceUnavailableException("down");
-        doThrow(creditError).when(accountClient).credit(2L, AMOUNT);
-
-        assertThatThrownBy(() -> transactionService.transfer(new TransferRequest(1L, 2L, AMOUNT)))
-                .isSameAs(creditError);
-
-        verify(accountClient).credit(1L, AMOUNT);
-        verifyNoInteractions(transactionRepository);
-    }
-
-    @Test
-    void transferRethrowsOriginalErrorWhenRefundAlsoFails() {
-        AccountServiceUnavailableException creditError = new AccountServiceUnavailableException("credit failed");
-        doThrow(creditError).when(accountClient).credit(2L, AMOUNT);
-        doThrow(new AccountServiceUnavailableException("refund failed")).when(accountClient).credit(1L, AMOUNT);
-
-        assertThatThrownBy(() -> transactionService.transfer(new TransferRequest(1L, 2L, AMOUNT)))
-                .isSameAs(creditError);
-
-        verifyNoInteractions(transactionRepository);
-    }
-
-    @Test
-    void savedTransferHasCorrectAccounts() {
+    void transferStartsTransferSaga() {
         stubSave();
 
         transactionService.transfer(new TransferRequest(1L, 2L, AMOUNT));
 
-        Transaction saved = savedTransaction();
-        assertThat(saved.getSourceAccountId()).isEqualTo(1L);
-        assertThat(saved.getTargetAccountId()).isEqualTo(2L);
-        assertThat(saved.getAmount()).isEqualByComparingTo(AMOUNT);
+        Transaction started = startedTransaction();
+        assertThat(started.getType()).isEqualTo(TransactionType.TRANSFER);
+        assertThat(started.getSourceAccountId()).isEqualTo(1L);
+        assertThat(started.getTargetAccountId()).isEqualTo(2L);
+    }
+
+    @Test
+    void transferToSameAccountIsRejectedBeforeSaving() {
+        assertThatThrownBy(() -> transactionService.transfer(new TransferRequest(1L, 1L, AMOUNT)))
+                .isInstanceOf(BusinessException.class)
+                .hasMessage("Source and destination accounts must be different");
+
+        verifyNoInteractions(transactionRepository, transactionSaga);
     }
 
     @Test
@@ -201,12 +112,15 @@ class TransactionServiceTest {
     }
 
     @Test
-    void getTransactionReturnsTransaction() {
-        when(transactionRepository.findById(5L)).thenReturn(Optional.of(Transaction.deposit(1L, AMOUNT)));
+    void getTransactionReturnsFailureReason() {
+        Transaction failed = Transaction.withdrawal(1L, AMOUNT);
+        failed.fail("Insufficient funds in account 1000000000");
+        when(transactionRepository.findById(5L)).thenReturn(Optional.of(failed));
 
         TransactionResponse response = transactionService.getTransaction(5L);
 
-        assertThat(response.type()).isEqualTo(TransactionType.DEPOSIT);
+        assertThat(response.status()).isEqualTo(TransactionStatus.FAILED);
+        assertThat(response.failureReason()).isEqualTo("Insufficient funds in account 1000000000");
     }
 
     @Test

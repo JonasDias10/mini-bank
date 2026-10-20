@@ -3,10 +3,9 @@ package com.simplebank.account.service;
 import com.simplebank.account.TestcontainersConfiguration;
 import com.simplebank.account.dto.AccountResponse;
 import com.simplebank.account.dto.CreateCustomerRequest;
-import com.simplebank.account.dto.CustomerResponse;
 import com.simplebank.account.exception.DuplicateResourceException;
-import com.simplebank.account.exception.InsufficientFundsException;
 import com.simplebank.account.model.Account;
+import com.simplebank.account.model.OperationType;
 import com.simplebank.account.repository.AccountRepository;
 import com.simplebank.account.repository.CustomerRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -59,6 +58,12 @@ class AccountServiceIntegrationTest {
         return customerService.createCustomer(new CreateCustomerRequest("Ana Souza", email)).id();
     }
 
+    private Long createAccountWithBalance(String balance) {
+        Long accountId = accountService.createAccount(createCustomer("ana@example.com")).id();
+        accountService.applyOperation(accountId, OperationType.CREDIT, new BigDecimal(balance));
+        return accountId;
+    }
+
     @Test
     void allMigrationsAreApplied() {
         Integer failed = jdbcTemplate.queryForObject(
@@ -94,22 +99,20 @@ class AccountServiceIntegrationTest {
 
     @Test
     void persistsCreditsAndDebits() {
-        Long accountId = accountService.createAccount(createCustomer("ana@example.com")).id();
+        Long accountId = createAccountWithBalance("100.00");
 
-        accountService.credit(accountId, new BigDecimal("100.00"));
-        accountService.debit(accountId, new BigDecimal("30.50"));
+        accountService.applyOperation(accountId, OperationType.DEBIT, new BigDecimal("30.50"));
 
         assertThat(accountService.getBalance(accountId).balance()).isEqualByComparingTo("69.50");
     }
 
     @Test
     void failedDebitDoesNotChangeStoredBalance() {
-        Long accountId = accountService.createAccount(createCustomer("ana@example.com")).id();
-        accountService.credit(accountId, new BigDecimal("10.00"));
+        Long accountId = createAccountWithBalance("10.00");
 
-        assertThatThrownBy(() -> accountService.debit(accountId, new BigDecimal("10.01")))
-                .isInstanceOf(InsufficientFundsException.class);
+        OperationResult result = accountService.applyOperation(accountId, OperationType.DEBIT, new BigDecimal("10.01"));
 
+        assertThat(result.success()).isFalse();
         assertThat(accountService.getBalance(accountId).balance()).isEqualByComparingTo("10.00");
     }
 
@@ -125,19 +128,13 @@ class AccountServiceIntegrationTest {
 
     @Test
     void concurrentDebitsNeverOverdrawTheAccount() throws Exception {
-        Long accountId = accountService.createAccount(createCustomer("ana@example.com")).id();
-        accountService.credit(accountId, new BigDecimal("100.00"));
+        Long accountId = createAccountWithBalance("100.00");
 
         int attempts = 10;
         CountDownLatch start = new CountDownLatch(1);
         Callable<Boolean> debitTwenty = () -> {
             start.await();
-            try {
-                accountService.debit(accountId, new BigDecimal("20.00"));
-                return true;
-            } catch (InsufficientFundsException ex) {
-                return false;
-            }
+            return accountService.applyOperation(accountId, OperationType.DEBIT, new BigDecimal("20.00")).success();
         };
 
         List<Future<Boolean>> results = new ArrayList<>();

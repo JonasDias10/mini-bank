@@ -32,12 +32,6 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage(), request, null);
     }
 
-    @ExceptionHandler(AccountServiceUnavailableException.class)
-    public ResponseEntity<ErrorResponse> handleAccountServiceDown(AccountServiceUnavailableException ex,
-                                                                  HttpServletRequest request) {
-        return build(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), request, null);
-    }
-
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest request) {
         Map<String, String> fieldErrors = new LinkedHashMap<>();

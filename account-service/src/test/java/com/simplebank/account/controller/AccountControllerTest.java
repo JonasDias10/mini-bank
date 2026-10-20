@@ -2,7 +2,6 @@ package com.simplebank.account.controller;
 
 import com.simplebank.account.dto.AccountResponse;
 import com.simplebank.account.dto.BalanceResponse;
-import com.simplebank.account.exception.InsufficientFundsException;
 import com.simplebank.account.exception.ResourceNotFoundException;
 import com.simplebank.account.service.AccountService;
 import org.junit.jupiter.api.Test;
@@ -18,7 +17,6 @@ import java.time.Instant;
 
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.containsString;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -121,60 +119,6 @@ class AccountControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accountId").value(10))
                 .andExpect(jsonPath("$.balance").value(42.00));
-    }
-
-    @Test
-    void creditReturns200WithNewBalance() throws Exception {
-        when(accountService.credit(10L, new BigDecimal("25.50"))).thenReturn(account("125.50"));
-
-        postJson("/api/accounts/10/credit", """
-                {"amount": 25.50}
-                """)
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.balance").value(125.50));
-    }
-
-    @Test
-    void creditReturns400WhenAmountIsZero() throws Exception {
-        postJson("/api/accounts/10/credit", """
-                {"amount": 0}
-                """)
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.fieldErrors.amount").value("Amount must be at least 0.01"));
-
-        verifyNoInteractions(accountService);
-    }
-
-    @Test
-    void creditReturns400WhenAmountHasMoreThanTwoDecimals() throws Exception {
-        postJson("/api/accounts/10/credit", """
-                {"amount": 10.123}
-                """)
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.fieldErrors.amount").value("Amount must have at most 2 decimal places"));
-    }
-
-    @Test
-    void debitReturns200WithNewBalance() throws Exception {
-        when(accountService.debit(10L, new BigDecimal("20.00"))).thenReturn(account("80.00"));
-
-        postJson("/api/accounts/10/debit", """
-                {"amount": 20.00}
-                """)
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.balance").value(80.00));
-    }
-
-    @Test
-    void debitReturns422WhenFundsAreInsufficient() throws Exception {
-        when(accountService.debit(any(), any()))
-                .thenThrow(new InsufficientFundsException("Insufficient funds in account 1000000000"));
-
-        postJson("/api/accounts/10/debit", """
-                {"amount": 500.00}
-                """)
-                .andExpect(status().isUnprocessableEntity())
-                .andExpect(jsonPath("$.message").value("Insufficient funds in account 1000000000"));
     }
 
     @Test

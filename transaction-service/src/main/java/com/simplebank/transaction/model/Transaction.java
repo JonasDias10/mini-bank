@@ -12,6 +12,7 @@ import jakarta.persistence.Table;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.UUID;
 
 @Entity
 @Table(name = "transactions")
@@ -33,6 +34,22 @@ public class Transaction {
 
     @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal amount;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private TransactionStatus status = TransactionStatus.PENDING;
+
+    // The step waiting for a reply from account-service. Null once the transaction is settled.
+    @Enumerated(EnumType.STRING)
+    @Column(length = 20)
+    private SagaStep step;
+
+    // Id of the command sent for the current step; the reply carries it back.
+    @Column(unique = true)
+    private UUID currentOperationId;
+
+    @Column(length = 500)
+    private String failureReason;
 
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
@@ -64,6 +81,32 @@ public class Transaction {
         createdAt = Instant.now();
     }
 
+    public void moveTo(SagaStep nextStep, UUID operationId) {
+        step = nextStep;
+        currentOperationId = operationId;
+    }
+
+    public void complete() {
+        status = TransactionStatus.COMPLETED;
+        clearStep();
+    }
+
+    public void fail(String reason) {
+        status = TransactionStatus.FAILED;
+        failureReason = reason;
+        clearStep();
+    }
+
+    // Keeps why a transfer is being reverted while the refund step is still running.
+    public void recordFailureReason(String reason) {
+        failureReason = reason;
+    }
+
+    private void clearStep() {
+        step = null;
+        currentOperationId = null;
+    }
+
     public Long getId() {
         return id;
     }
@@ -82,6 +125,22 @@ public class Transaction {
 
     public BigDecimal getAmount() {
         return amount;
+    }
+
+    public TransactionStatus getStatus() {
+        return status;
+    }
+
+    public SagaStep getStep() {
+        return step;
+    }
+
+    public UUID getCurrentOperationId() {
+        return currentOperationId;
+    }
+
+    public String getFailureReason() {
+        return failureReason;
     }
 
     public Instant getCreatedAt() {

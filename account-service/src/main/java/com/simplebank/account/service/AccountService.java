@@ -2,16 +2,17 @@ package com.simplebank.account.service;
 
 import com.simplebank.account.dto.AccountResponse;
 import com.simplebank.account.dto.BalanceResponse;
-import com.simplebank.account.exception.InsufficientFundsException;
 import com.simplebank.account.exception.ResourceNotFoundException;
 import com.simplebank.account.model.Account;
 import com.simplebank.account.model.Customer;
+import com.simplebank.account.model.OperationType;
 import com.simplebank.account.repository.AccountRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class AccountService {
@@ -52,35 +53,28 @@ public class AccountService {
     }
 
     @Transactional
-    public AccountResponse credit(Long id, BigDecimal amount) {
-        Account account = findAccountForUpdate(id);
-        account.credit(amount);
-        return AccountResponse.from(account);
-    }
+    public OperationResult applyOperation(Long accountId, OperationType type, BigDecimal amount) {
+        Optional<Account> found = accountRepository.findByIdForUpdate(accountId);
 
-    @Transactional
-    public AccountResponse debit(Long id, BigDecimal amount) {
-        Account account = findAccountForUpdate(id);
-
-        if (!account.hasEnoughBalance(amount)) {
-            throw new InsufficientFundsException("Insufficient funds in account " + account.getAccountNumber());
+        if (found.isEmpty()) {
+            return OperationResult.failed("Account not found with id " + accountId);
         }
 
-        account.debit(amount);
-        return AccountResponse.from(account);
+        Account account = found.get();
+
+        if (type == OperationType.DEBIT && !account.hasEnoughBalance(amount)) {
+            return OperationResult.failed("Insufficient funds in account " + account.getAccountNumber());
+        }
+
+        switch (type) {
+            case CREDIT -> account.credit(amount);
+            case DEBIT -> account.debit(amount);
+        }
+        return OperationResult.succeeded();
     }
 
     private Account findAccount(Long id) {
         return accountRepository.findById(id)
-                .orElseThrow(() -> accountNotFound(id));
-    }
-
-    private Account findAccountForUpdate(Long id) {
-        return accountRepository.findByIdForUpdate(id)
-                .orElseThrow(() -> accountNotFound(id));
-    }
-
-    private ResourceNotFoundException accountNotFound(Long id) {
-        return new ResourceNotFoundException("Account not found with id " + id);
+                .orElseThrow(() -> new ResourceNotFoundException("Account not found with id " + id));
     }
 }

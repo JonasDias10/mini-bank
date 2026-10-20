@@ -31,19 +31,19 @@ public class TransactionController {
     }
 
     @PostMapping("/deposit")
-    @ResponseStatus(HttpStatus.CREATED)
+    @ResponseStatus(HttpStatus.ACCEPTED)
     public TransactionResponse deposit(@Valid @RequestBody AccountOperationRequest request) {
         return transactionService.deposit(request);
     }
 
     @PostMapping("/withdraw")
-    @ResponseStatus(HttpStatus.CREATED)
+    @ResponseStatus(HttpStatus.ACCEPTED)
     public TransactionResponse withdraw(@Valid @RequestBody AccountOperationRequest request) {
         return transactionService.withdraw(request);
     }
 
     @PostMapping("/transfer")
-    @ResponseStatus(HttpStatus.CREATED)
+    @ResponseStatus(HttpStatus.ACCEPTED)
     public TransactionResponse transfer(@Valid @RequestBody TransferRequest request) {
         return transactionService.transfer(request);
     }

@@ -12,3 +12,21 @@ spring:
     hibernate:
       ddl-auto: validate
     open-in-view: false
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: 5672
+    username: ${RABBITMQ_USERNAME:simplebank}
+    password: ${RABBITMQ_PASSWORD:simplebank}
+    # The outbox relay waits for the broker to confirm each message before marking it as sent.
+    publisher-confirm-type: simple
+    listener:
+      simple:
+        # After the retries below, a failing message goes to its dead-letter queue instead of looping forever.
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 1s
+
+outbox:
+  relay-interval-ms: 500
