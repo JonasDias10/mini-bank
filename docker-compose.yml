@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: simplebank-postgres
+    environment:
+      POSTGRES_USER: simplebank
+      POSTGRES_PASSWORD: simplebank
+      POSTGRES_DB: accountdb
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simplebank -d accountdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  account-service:
+    build: ./account-service
+    container_name: simplebank-account-service
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/accountdb
+      DB_USERNAME: simplebank
+      DB_PASSWORD: simplebank
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  transaction-service:
+    build: ./transaction-service
+    container_name: simplebank-transaction-service
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/transactiondb
+      DB_USERNAME: simplebank
+      DB_PASSWORD: simplebank
+      ACCOUNT_SERVICE_URL: http://account-service:8081
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      account-service:
+        condition: service_started
+
+  frontend:
+    build: ./frontend
+    container_name: simplebank-frontend
+    ports:
+      - "4200:80"
+    depends_on:
+      - account-service
+      - transaction-service
+
+volumes:
+  postgres-data:
