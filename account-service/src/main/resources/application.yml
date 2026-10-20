@@ -1,0 +1,14 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: account-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/accountdb}
+    username: ${DB_USERNAME:simplebank}
+    password: ${DB_PASSWORD:simplebank}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
