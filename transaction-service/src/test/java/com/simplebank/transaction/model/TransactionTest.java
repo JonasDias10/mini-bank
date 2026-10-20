@@ -23,6 +23,12 @@ class TransactionTest {
     }
 
     @Test
+    void amountAlwaysHasTwoDecimalPlaces() {
+        assertThat(Transaction.deposit(1L, new BigDecimal("100")).getAmount()).hasToString("100.00");
+        assertThat(Transaction.deposit(1L, new BigDecimal("12.5")).getAmount()).hasToString("12.50");
+    }
+
+    @Test
     void withdrawalOnlyHasSourceAccount() {
         Transaction transaction = Transaction.withdrawal(1L, AMOUNT);
 

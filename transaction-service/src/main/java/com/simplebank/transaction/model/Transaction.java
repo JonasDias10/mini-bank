@@ -61,7 +61,8 @@ public class Transaction {
         this.type = type;
         this.sourceAccountId = sourceAccountId;
         this.targetAccountId = targetAccountId;
-        this.amount = amount;
+        // Same scale as the database column, so the 202 response shows 100.00 like later reads do.
+        this.amount = amount.setScale(2);
     }
 
     public static Transaction deposit(Long accountId, BigDecimal amount) {
